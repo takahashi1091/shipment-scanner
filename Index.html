@@ -1,0 +1,134 @@
+
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>荷物スキャン & リスト化（インストール不要）</title>
+  <meta name="theme-color" content="#111111" />
+  <style>
+    :root{
+      --bg:#f5f5f7; --fg:#111; --muted:#666; --card:#fff; --primary:#0a7; --danger:#c33; --dark:#333;
+      --chip:#eee; --chip-on:#111; --chip-on-fg:#fff;
+    }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
+    .wrap{max-width:980px;margin:0 auto;padding:12px;display:grid;gap:12px;}
+    h1{font-size:18px;margin:4px 0 0;font-weight:800}
+    .card{background:var(--card);border-radius:12px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+    .row{display:grid;gap:6px;margin-bottom:8px}
+    .label{font-weight:700;font-size:13px}
+    .input, select{border:1px solid #ccc;border-radius:8px;padding:10px;background:#fff;font-size:16px}
+    .btn{border:none;border-radius:10px;padding:12px 14px;font-weight:700;font-size:15px;color:#fff;background:var(--primary);cursor:pointer}
+    .btn.dark{background:var(--dark)}
+    .btn.danger{background:var(--danger)}
+    .btn.ghost{background:#e5e5e5;color:#111}
+    .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .chips{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{padding:8px 12px;border-radius:999px;background:var(--chip);cursor:pointer;border:1px solid #ccc}
+    .chip.on{background:var(--chip-on);color:var(--chip-on-fg);border-color:var(--chip-on)}
+    .group{background:#fafafa;border-radius:12px;padding:10px;margin-bottom:10px}
+    .group h3{margin:0 0 8px;font-size:15px}
+    .rowItem{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid #eee}
+    .muted{color:var(--muted);font-size:12px}
+    video{width:100%;border-radius:12px;background:#000}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap}
+    .note{font-size:12px;color:#555}
+    .warn{background:#fff4d6;border:1px solid #ffd36b;color:#7a5b00;padding:8px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>荷物スキャン & リスト化（インストール不要・iOS/Android対応）</h1>
+      <div class="warn" id="httpsWarn" style="display:none">
+        このページは <b>https / localhost</b> で開く必要があります（カメラ使用のため）。
+      </div>
+      <div class="note">
+        ・店名は扱いません。<b>コード・都道府県・運送会社・サイズ・サービス・個口</b>のみ。<br/>
+        ・任意で <b>マスタCSV（code,prefecture,carrier）</b> を読み込むと、自動補完されます。
+      </div>
+    </div>
+
+    <!-- スキャン & 入力 -->
+    <div class="card">
+      <div class="toolbar">
+        <button class="btn dark" id="startScanBtn">スキャン開始</button>
+        <button class="btn ghost" id="stopScanBtn">停止</button>
+        <input type="file" accept="text/csv" id="masterFile" style="display:none" />
+        <button class="btn ghost" id="loadMasterBtn">マスタCSV読込</button>
+        <button class="btn ghost" id="exportMasterBtn" title="現在のマスタをCSVとして書き出し">マスタCSV書出</button>
+      </div>
+      <video id="preview" playsinline muted></video>
+      <div class="note">※ 対応ブラウザでは高速なバーコード/QR読み取りが動作します。未対応端末は手入力をご利用ください。</div>
+
+      <div class="row">
+        <div class="label">コード（スキャン or 手入力）</div>
+        <input class="input" id="code" placeholder="スキャンすると自動で入ります">
+      </div>
+
+      <div class="row">
+        <div class="label">サイズ</div>
+        <div class="chips" id="sizeChips"></div>
+      </div>
+
+      <div class="row">
+        <div class="label">サービス</div>
+        <div class="chips" id="serviceChips"></div>
+      </div>
+
+      <div class="row">
+        <div class="label">都道府県</div>
+        <select id="prefSel" class="input"></select>
+      </div>
+
+      <div class="row">
+        <div class="label">個口数</div>
+        <input class="input" id="qty" type="number" min="1" value="1" style="max-width:140px">
+      </div>
+
+      <div class="row">
+        <div class="label">運送会社</div>
+        <div class="chips" id="carrierChips"></div>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn" id="addBtn">追加</button>
+        <button class="btn danger" id="clearAllBtn">全削除</button>
+      </div>
+    </div>
+
+    <!-- リスト表示 -->
+    <div class="card">
+      <div class="toolbar">
+        <button class="btn" id="exportCsvBtn">CSVエクスポート</button>
+        <label class="flex" style="gap:6px">
+          <input type="checkbox" id="splitByCarrier"> キャリア別に分割出力
+        </label>
+      </div>
+      <div id="listContainer"></div>
+    </div>
+
+    <div class="card">
+      <div class="note">
+        保存先：この端末のブラウザ内（localStorage）。<br/>
+        ルール：<b>マスタ未設定時</b>は簡易推奨（関東=ヤマト、関西=佐川、他=日本郵便／クール=ヤマト）。<br/>
+        互換性：<b>BarcodeDetector</b>非対応の端末では、スキャンが使えない場合があります（その場合は手入力）。後で ZXing 連携も可能です。
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // ======== 定義 ========
+  const SIZES = ["60","80","100","120","140","160","180","200"];
+  const SERVICES = ["常温","クール"];
+  const CARRIERS = ["ヤマト運輸","佐川急便","日本郵便"];
+  const PREFS = ["北海道","青森県","岩手県","宮城県","秋田県","山形県","福島県","茨城県","栃木県","群馬県","埼玉県","千葉県","東京都","神奈川県","新潟県","富山県","石川県","福井県","山梨県","長野県","岐阜県","静岡県","愛知県","三重県","滋賀県","京都府","大阪府","兵庫県","奈良県","和歌山県","鳥取県","島根県","岡山県","広島県","山口県","徳島県","香川県","愛媛県","高知県","福岡県","佐賀県","長崎県","熊本県","大分県","宮崎県","鹿児島県","沖縄県"];
+
+  // ======== 状態 ========
+  const state = {
+    size: "80",
+    service: "常温",
+    carrier: "ヤマト運輸",
+    pref: "愛知県",
+    list: [],           // 展開済み 1レコード=1個口
+    master: {},         // code -> { prefecture, carrier }
