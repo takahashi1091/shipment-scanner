@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>荷物スキャン & リスト化（ZXing互換モード）</title>
+  <title>荷物スキャン & リスト化（ZXing互換モード修正版）</title>
   <meta name="theme-color" content="#111111" />
   <style>
     :root{
@@ -227,10 +227,11 @@
   }
 
   // ======== スキャン（BarcodeDetector -> ZXing フォールバック） ========
-  let mediaStream = null;
+  let mediaStream = null;       // 自前 getUserMedia 用（BD時のみ使用）
   let scanning = false;
-  let detector = null;
-  let zxingControlsStop = null; // ZXing停止ハンドル
+  let detector = null;          // BarcodeDetector
+  let zxingReader = null;       // ZXing Reader
+  let zxingControls = null;     // ZXing 停止ハンドル
 
   function showScanError(msg) {
     el.scanError.style.display = "block";
@@ -243,40 +244,40 @@
 
   async function startScan(){
     clearScanError();
-    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
-      showScanError("このブラウザは getUserMedia に未対応です。別ブラウザでお試しください。");
-      alert("このブラウザはカメラに対応していません。手入力をご利用ください。");
-      return;
-    }
-    try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false
-      });
-      el.preview.srcObject = mediaStream;
-      await el.preview.play();
-      scanning = true;
-
-      if ('BarcodeDetector' in window) {
+    // BarcodeDetector がある端末はフレーム解析方式
+    if ('BarcodeDetector' in window) {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
+        });
+        el.preview.srcObject = mediaStream;
+        await el.preview.play();
+        scanning = true;
         const formats = ['qr_code','code_128','ean_13','upc_a','itf'];
         detector = new window.BarcodeDetector({ formats });
         scanLoop();
-      } else {
-        await startZxingFallback();
+      } catch (e) {
+        console.error(e);
+        handleGumError(e);
       }
-    } catch (e) {
-      console.error(e);
-      if (e.name === "NotAllowedError") {
-        showScanError("カメラの権限が許可されていません。ブラウザの権限設定で『カメラを許可』してください。");
-      } else if (e.name === "NotFoundError" || e.message?.includes("device not found")) {
-        showScanError("カメラデバイスが見つかりません。別の端末やブラウザでお試しください。");
-      } else if (location.protocol !== "https:" && location.hostname !== "localhost") {
-        showScanError("https で開かれていません。GitHub Pages の https URL で開いてください。");
-      } else {
-        showScanError(e.message || String(e));
-      }
-      alert("カメラを開始できませんでした。上の注意を確認してください。");
+    } else {
+      // ZXing に全て任せる（こちらでは getUserMedia しない）
+      await startZxingFallback();
     }
+  }
+
+  function handleGumError(e){
+    if (e.name === "NotAllowedError") {
+      showScanError("カメラの権限が許可されていません。ブラウザの権限設定で『カメラを許可』してください。");
+    } else if (e.name === "NotFoundError" || e.message?.includes("device not found")) {
+      showScanError("カメラデバイスが見つかりません。別の端末やブラウザでお試しください。");
+    } else if (location.protocol !== "https:" && location.hostname !== "localhost") {
+      showScanError("https で開かれていません。GitHub Pages の https URL で開いてください。");
+    } else {
+      showScanError(e.message || String(e));
+    }
+    alert("カメラを開始できませんでした。上の注意を確認してください。");
   }
 
   async function scanLoop(){
@@ -298,23 +299,30 @@
 
   async function startZxingFallback(){
     try {
-      const codeReader = new ZXingBrowser.BrowserMultiFormatReader();
-      const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
-      let deviceId = devices?.find(d => /back|rear|環境/i.test(d.label))?.deviceId || devices?.[0]?.deviceId;
-      if (!deviceId) {
-        showScanError("利用可能なカメラデバイスが見つかりません");
+      const ZX = window.ZXingBrowser || window.ZXing;
+      if (!ZX) {
+        showScanError("ZXing ライブラリが読み込めていません（CDNブロックの可能性）");
         return;
       }
+      // ヒントは省略可：第2引数でスキャン間隔（ms）
+      zxingReader = new ZX.BrowserMultiFormatReader(undefined, 350);
+
       scanning = true;
-      await codeReader.decodeFromVideoDevice(deviceId, el.preview, (result, err, controls) => {
-        // コールバックは連続で呼ばれる。成功時に停止する。
-        if (result) {
-          scanning = false;
-          zxingControlsStop = controls.stop;
-          stopScan(false);
-          onCodeDetected(result.getText());
+      // facingMode指定でデバイスID不要＆iOSでも安定
+      const controls = await zxingReader.decodeFromConstraints(
+        { video: { facingMode: { ideal: 'environment' } }, audio: false },
+        el.preview,
+        (result, err, ctl) => {
+          if (result) {
+            scanning = false;
+            zxingControls = ctl;
+            stopScan(false);
+            onCodeDetected(result.getText());
+          }
+          // err は連続検出中に随時出るので握りつぶす
         }
-      });
+      );
+      zxingControls = controls;
     } catch (e) {
       console.error(e);
       showScanError("ZXing 互換モードの起動に失敗しました: " + (e.message || e));
@@ -323,12 +331,17 @@
 
   function stopScan(stopVideo = true){
     scanning = false;
-    detector = null;
-    if (zxingControlsStop) { try { zxingControlsStop(); } catch(_){} zxingControlsStop = null; }
+
+    // ZXing を止める（先に）
+    if (zxingControls) { try { zxingControls.stop(); } catch(_){} zxingControls = null; }
+    if (zxingReader)    { try { zxingReader.reset(); } catch(_){} zxingReader = null; }
+
+    // BarcodeDetector 用の自前ストリームを止める
     if (stopVideo && mediaStream) {
-      mediaStream.getTracks().forEach(t => t.stop());
+      try { mediaStream.getTracks().forEach(t => t.stop()); } catch(_) {}
       mediaStream = null;
     }
+    detector = null;
     el.preview.srcObject = null;
   }
 
@@ -344,7 +357,6 @@
   }
 
   // ======== マスタCSV ========
-  // 形式: code,prefecture,carrier（ヘッダ推奨）
   function parseCsv(text){
     const lines = text.replace(/\r/g,"").split("\n").filter(l => l.trim());
     if (lines.length === 0) return {};
@@ -539,3 +551,4 @@
   </script>
 </body>
 </html>
+``
