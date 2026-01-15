@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>荷物スキャン & リスト化（インストール不要）</title>
+  <title>荷物スキャン & リスト化（ZXing互換モード）</title>
   <meta name="theme-color" content="#111111" />
   <style>
     :root{
@@ -12,7 +12,7 @@
       --chip:#eee; --chip-on:#111; --chip-on-fg:#fff;
     }
     html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
-    .wrap{max-width:980px;margin:0 auto;padding:12px;display:grid;gap:12px;}
+    .wrap{max-width:980px;margin:0 auto;padding:12px;display:grid;gap:12px}
     h1{font-size:18px;margin:4px 0 0;font-weight:800}
     .card{background:var(--card);border-radius:12px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
     .row{display:grid;gap:6px;margin-bottom:8px}
@@ -36,17 +36,16 @@
     .warn{background:#fff4d6;border:1px solid #ffd36b;color:#7a5b00;padding:8px;border-radius:8px}
   </style>
 </head>
-https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js</script>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>荷物スキャン & リスト化（インストール不要・iOS/Android対応）</h1>
+      <h1>荷物スキャン & リスト化（インストール不要・iOS/Android対応・ZXing互換）</h1>
       <div class="warn" id="httpsWarn" style="display:none">
-        このページは <b>https / localhost</b> で開く必要があります（カメラ使用のため）。
+        カメラ利用には <b>https / localhost</b> が必要です。GitHub Pages の https URL から開いてください。
       </div>
       <div class="note">
         ・店名は扱いません。<b>コード・都道府県・運送会社・サイズ・サービス・個口</b>のみ。<br/>
-        ・任意で <b>マスタCSV（code,prefecture,carrier）</b> を読み込むと、自動補完されます。
+        ・任意：<b>マスタCSV（code,prefecture,carrier）</b>を読み込むと、補完されます。
       </div>
     </div>
 
@@ -60,7 +59,8 @@ https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js</script>
         <button class="btn ghost" id="exportMasterBtn" title="現在のマスタをCSVとして書き出し">マスタCSV書出</button>
       </div>
       <video id="preview" playsinline muted></video>
-      <div class="note">※ 対応ブラウザでは高速なバーコード/QR読み取りが動作します。未対応端末は手入力をご利用ください。</div>
+      <div id="scanError" class="warn" style="display:none;margin-top:8px"></div>
+      <div class="note">※ BarcodeDetector 非対応端末では ZXing 互換モードに自動切替します。</div>
 
       <div class="row">
         <div class="label">コード（スキャン or 手入力）</div>
@@ -113,10 +113,13 @@ https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js</script>
       <div class="note">
         保存先：この端末のブラウザ内（localStorage）。<br/>
         ルール：<b>マスタ未設定時</b>は簡易推奨（関東=ヤマト、関西=佐川、他=日本郵便／クール=ヤマト）。<br/>
-        互換性：<b>BarcodeDetector</b>非対応の端末では、スキャンが使えない場合があります（その場合は手入力）。後で ZXing 連携も可能です。
+        互換性：BarcodeDetector 非対応端末は ZXing 互換モードで読み取り。
       </div>
     </div>
   </div>
+
+  <!-- ZXing（互換モード）の CDN 読み込み -->
+  https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js</script>
 
   <script>
   // ======== 定義 ========
@@ -132,5 +135,407 @@ https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js</script>
     carrier: "ヤマト運輸",
     pref: "愛知県",
     list: [],           // 展開済み 1レコード=1個口
-
     master: {},         // code -> { prefecture, carrier }
+  };
+
+  // ======== 要素 ========
+  const el = {
+    httpsWarn: document.getElementById("httpsWarn"),
+    preview: document.getElementById("preview"),
+    startScanBtn: document.getElementById("startScanBtn"),
+    stopScanBtn: document.getElementById("stopScanBtn"),
+    code: document.getElementById("code"),
+    sizeChips: document.getElementById("sizeChips"),
+    serviceChips: document.getElementById("serviceChips"),
+    carrierChips: document.getElementById("carrierChips"),
+    prefSel: document.getElementById("prefSel"),
+    qty: document.getElementById("qty"),
+    addBtn: document.getElementById("addBtn"),
+    clearAllBtn: document.getElementById("clearAllBtn"),
+    listContainer: document.getElementById("listContainer"),
+    exportCsvBtn: document.getElementById("exportCsvBtn"),
+    splitByCarrier: document.getElementById("splitByCarrier"),
+    masterFile: document.getElementById("masterFile"),
+    loadMasterBtn: document.getElementById("loadMasterBtn"),
+    exportMasterBtn: document.getElementById("exportMasterBtn"),
+    scanError: document.getElementById("scanError"),
+  };
+
+  // ======== 初期UI構築 ========
+  function initChips(container, items, currentGetter, onSelect) {
+    container.innerHTML = "";
+    items.forEach(v => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip" + (currentGetter()===v?" on":"");
+      b.textContent = v;
+      b.onclick = () => {
+        onSelect(v);
+        initChips(container, items, currentGetter, onSelect);
+        refreshCarrierAuto();
+      };
+      container.appendChild(b);
+    });
+  }
+
+  function buildPrefSelect() {
+    el.prefSel.innerHTML = PREFS.map(p => `<option value="${p}">${p}</option>`).join("");
+    el.prefSel.value = state.pref;
+    el.prefSel.onchange = () => { state.pref = el.prefSel.value; refreshCarrierAuto(); persist(); };
+  }
+
+  function renderGroups() {
+    const groups = CARRIERS.map(c => ({carrier:c, items: state.list.filter(x => x.carrier === c)}));
+    el.listContainer.innerHTML = groups.map(g => {
+      const rows = g.items.map(x => `
+        <div class="rowItem">
+          <div>
+            <div><b>${escapeHtml(x.code)}</b> <span class="muted">(${x.size}/${x.service}/${x.prefecture})</span></div>
+          </div>
+          <div class="muted">${new Date(x.createdAt).toLocaleString()}</div>
+        </div>
+      `).join("");
+      return `
+        <div class="group">
+          <h3>${g.carrier}（${g.items.length}件）</h3>
+          ${rows || '<div class="muted">なし</div>'}
+        </div>
+      `;
+    }).join("");
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+  // ======== 推奨キャリア（簡易） ========
+  function recommendCarrier(size, pref, service){
+    if (service === "クール") return "ヤマト運輸";
+    const KANTO = ["東京都","神奈川県","千葉県","埼玉県","茨城県","栃木県","群馬県"];
+    const KANSAI = ["大阪府","京都府","兵庫県","滋賀県","奈良県","和歌山県"];
+    if (KANTO.includes(pref)) return "ヤマト運輸";
+    if (KANSAI.includes(pref)) return "佐川急便";
+    return "日本郵便";
+  }
+
+  function refreshCarrierAuto(){
+    const code = el.code.value.trim();
+    if (code && state.master[code]?.carrier) {
+      state.carrier = state.master[code].carrier;
+    } else {
+      state.carrier = recommendCarrier(state.size, state.pref, state.service);
+    }
+    initChips(el.carrierChips, CARRIERS, () => state.carrier, v => { state.carrier=v; persist(); });
+  }
+
+  // ======== スキャン（BarcodeDetector -> ZXing フォールバック） ========
+  let mediaStream = null;
+  let scanning = false;
+  let detector = null;
+  let zxingControlsStop = null; // ZXing停止ハンドル
+
+  function showScanError(msg) {
+    el.scanError.style.display = "block";
+    el.scanError.textContent = "カメラ初期化エラー: " + msg;
+  }
+  function clearScanError() {
+    el.scanError.style.display = "none";
+    el.scanError.textContent = "";
+  }
+
+  async function startScan(){
+    clearScanError();
+    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
+      showScanError("このブラウザは getUserMedia に未対応です。別ブラウザでお試しください。");
+      alert("このブラウザはカメラに対応していません。手入力をご利用ください。");
+      return;
+    }
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+      el.preview.srcObject = mediaStream;
+      await el.preview.play();
+      scanning = true;
+
+      if ('BarcodeDetector' in window) {
+        const formats = ['qr_code','code_128','ean_13','upc_a','itf'];
+        detector = new window.BarcodeDetector({ formats });
+        scanLoop();
+      } else {
+        await startZxingFallback();
+      }
+    } catch (e) {
+      console.error(e);
+      if (e.name === "NotAllowedError") {
+        showScanError("カメラの権限が許可されていません。ブラウザの権限設定で『カメラを許可』してください。");
+      } else if (e.name === "NotFoundError" || e.message?.includes("device not found")) {
+        showScanError("カメラデバイスが見つかりません。別の端末やブラウザでお試しください。");
+      } else if (location.protocol !== "https:" && location.hostname !== "localhost") {
+        showScanError("https で開かれていません。GitHub Pages の https URL で開いてください。");
+      } else {
+        showScanError(e.message || String(e));
+      }
+      alert("カメラを開始できませんでした。上の注意を確認してください。");
+    }
+  }
+
+  async function scanLoop(){
+    if (!scanning || !detector) return;
+    try {
+      const codes = await detector.detect(el.preview);
+      if (codes && codes.length > 0) {
+        const v = (codes[0].rawValue || "").trim();
+        if (v) {
+          scanning = false;
+          stopScan(false);
+          onCodeDetected(v);
+          return;
+        }
+      }
+    } catch(e) { /* noop */ }
+    requestAnimationFrame(scanLoop);
+  }
+
+  async function startZxingFallback(){
+    try {
+      const codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+      let deviceId = devices?.find(d => /back|rear|環境/i.test(d.label))?.deviceId || devices?.[0]?.deviceId;
+      if (!deviceId) {
+        showScanError("利用可能なカメラデバイスが見つかりません");
+        return;
+      }
+      scanning = true;
+      await codeReader.decodeFromVideoDevice(deviceId, el.preview, (result, err, controls) => {
+        // コールバックは連続で呼ばれる。成功時に停止する。
+        if (result) {
+          scanning = false;
+          zxingControlsStop = controls.stop;
+          stopScan(false);
+          onCodeDetected(result.getText());
+        }
+      });
+    } catch (e) {
+      console.error(e);
+      showScanError("ZXing 互換モードの起動に失敗しました: " + (e.message || e));
+    }
+  }
+
+  function stopScan(stopVideo = true){
+    scanning = false;
+    detector = null;
+    if (zxingControlsStop) { try { zxingControlsStop(); } catch(_){} zxingControlsStop = null; }
+    if (stopVideo && mediaStream) {
+      mediaStream.getTracks().forEach(t => t.stop());
+      mediaStream = null;
+    }
+    el.preview.srcObject = null;
+  }
+
+  function onCodeDetected(value){
+    el.code.value = value;
+    if (state.master[value]) {
+      const m = state.master[value];
+      if (m.prefecture) { state.pref = m.prefecture; el.prefSel.value = m.prefecture; }
+      if (m.carrier) { state.carrier = m.carrier; }
+    }
+    refreshCarrierAuto();
+    if (navigator.vibrate) navigator.vibrate(50);
+  }
+
+  // ======== マスタCSV ========
+  // 形式: code,prefecture,carrier（ヘッダ推奨）
+  function parseCsv(text){
+    const lines = text.replace(/\r/g,"").split("\n").filter(l => l.trim());
+    if (lines.length === 0) return {};
+    let start = 0;
+    const first = lines[0].toLowerCase();
+    if (first.includes("code") && first.includes("prefecture")) { start = 1; }
+    const m = {};
+    for (let i=start;i<lines.length;i++){
+      const cols = splitCsvLine(lines[i]);
+      const code = (cols[0]||"").trim();
+      const pref = (cols[1]||"").trim();
+      const car  = (cols[2]||"").trim();
+      if (!code) continue;
+      m[code] = { prefecture: pref || undefined, carrier: car || undefined };
+    }
+    return m;
+  }
+  function splitCsvLine(line){
+    const out = [];
+    let cur = "", inQ = false;
+    for (let i=0;i<line.length;i++){
+      const ch = line[i];
+      if (inQ){
+        if (ch === '"'){
+          if (line[i+1] === '"'){ cur+='"'; i++; } else { inQ=false; }
+        } else { cur += ch; }
+      } else {
+        if (ch === ','){ out.push(cur); cur=""; }
+        else if (ch === '"'){ inQ = true; }
+        else { cur += ch; }
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  function exportMasterCsv(){
+    const rows = [["code","prefecture","carrier"]];
+    for (const [code, obj] of Object.entries(state.master)){
+      rows.push([code, obj.prefecture||"", obj.carrier||""]);
+    }
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    downloadBlob(csv, `master_${Date.now()}.csv`, "text/csv");
+  }
+
+  // ======== 追加/削除/保存 ========
+  function addItems(){
+    const code = el.code.value.trim();
+    const qty = Math.max(1, Number(el.qty.value || 1));
+    if (!code){ alert("コードが未入力です。スキャンするか手入力してください。"); return; }
+    const now = Date.now();
+    const newItems = Array.from({length:qty}).map((_,i)=>({
+      id: `${now}-${i}`,
+      code,
+      size: state.size,
+      service: state.service,
+      prefecture: state.pref,
+      carrier: state.carrier,
+      createdAt: now + i
+    }));
+    state.list.unshift(...newItems);
+    el.code.value = "";
+    el.qty.value = "1";
+    persist();
+    renderGroups();
+  }
+
+  function clearAll(){
+    if (!confirm("すべてのリストを削除しますか？")) return;
+    state.list = [];
+    persist();
+    renderGroups();
+  }
+
+  function persist(){
+    localStorage.setItem("scanner_state_v1", JSON.stringify({
+      size: state.size, service: state.service, carrier: state.carrier, pref: state.pref,
+      list: state.list, master: state.master
+    }));
+  }
+
+  function restore(){
+    try{
+      const raw = localStorage.getItem("scanner_state_v1");
+      if (raw){
+        const s = JSON.parse(raw);
+        state.size = s.size || state.size;
+        state.service = s.service || state.service;
+        state.carrier = s.carrier || state.carrier;
+        state.pref = s.pref || state.pref;
+        state.list = Array.isArray(s.list)? s.list : [];
+        state.master = s.master || {};
+      }
+    }catch(e){}
+  }
+
+  // ======== CSV出力 ========
+  function toCsvRows(items){
+    const header = ["code","size","service","carrier","prefecture","kokusu","created_at"];
+    const body = items.map(x => [x.code,x.size,x.service,x.carrier,x.prefecture,1,new Date(x.createdAt).toISOString()]);
+    return [header, ...body];
+  }
+  function rowsToCsv(rows){
+    return rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+  }
+
+  async function exportCsv(){
+    if (state.list.length === 0){ alert("リストが空です"); return; }
+    const split = el.splitByCarrier.checked;
+    if (!split){
+      const csv = rowsToCsv(toCsvRows(state.list));
+      await shareOrDownload(csv, `shipments_${Date.now()}.csv`);
+    } else {
+      for (const c of CARRIERS){
+        const items = state.list.filter(x => x.carrier===c);
+        if (items.length === 0) continue;
+        const csv = rowsToCsv(toCsvRows(items));
+        await shareOrDownload(csv, `${carrierFileName(c)}_${Date.now()}.csv`);
+      }
+    }
+  }
+
+  function carrierFileName(name){
+    if (name.includes("ヤマト")) return "yamato";
+    if (name.includes("佐川")) return "sagawa";
+    if (name.includes("日本郵便")) return "japanpost";
+    return "carrier";
+  }
+
+  async function shareOrDownload(csv, filename){
+    const blob = new Blob([csv], {type:"text/csv"});
+    if (navigator.canShare && navigator.canShare({ files: [new File([blob], filename, {type:"text/csv"})] })){
+      await navigator.share({ files: [new File([blob], filename, {type:"text/csv"})], title: "出力CSV" }).catch(()=>{});
+    } else if (navigator.share){
+      await navigator.share({ text: csv, title: filename }).catch(()=>{});
+    } else {
+      downloadBlob(csv, filename, "text/csv");
+    }
+  }
+
+  function downloadBlob(text, filename, mime){
+    const url = URL.createObjectURL(new Blob([text], {type:mime||"text/plain"}));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+  }
+
+  // ======== 起動処理 ========
+  (function boot(){
+    if (!(location.protocol === "https:" || location.hostname === "localhost")) {
+      el.httpsWarn.style.display = "block";
+    }
+
+    restore();
+
+    initChips(el.sizeChips, SIZES, () => state.size, v => { state.size=v; persist(); });
+    initChips(el.serviceChips, SERVICES, () => state.service, v => { state.service=v; persist(); });
+    initChips(el.carrierChips, CARRIERS, () => state.carrier, v => { state.carrier=v; persist(); });
+    buildPrefSelect();
+    renderGroups();
+
+    el.startScanBtn.onclick = startScan;
+    el.stopScanBtn.onclick = () => stopScan(true);
+    el.addBtn.onclick = addItems;
+    el.clearAllBtn.onclick = clearAll;
+    el.exportCsvBtn.onclick = exportCsv;
+
+    el.loadMasterBtn.onclick = () => el.masterFile.click();
+    el.masterFile.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      state.master = parseCsv(text);
+      persist();
+      alert("マスタを読み込みました（" + Object.keys(state.master).length + "件）");
+    };
+    el.exportMasterBtn.onclick = exportMasterCsv;
+
+    el.code.addEventListener("change", () => {
+      const v = el.code.value.trim();
+      if (v && state.master[v]){
+        const m = state.master[v];
+        if (m.prefecture) { state.pref = m.prefecture; el.prefSel.value = m.prefecture; }
+        if (m.carrier) { state.carrier = m.carrier; }
+      }
+      refreshCarrierAuto();
+    });
+  })();
+  </script>
+</body>
+</html>
